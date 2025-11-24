@@ -168,42 +168,56 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
     if (!inputValue.trim() || isLoading) return;
 
     const originalUserInput = inputValue.trim();
-    // Lock immediately so rapid key presses don't enqueue duplicate sends
     setIsLoading(true);
-    
-    // Detect language of user input
-    const detectedLanguage = await detectLanguage(originalUserInput);
+
+    const detectionPromise = detectLanguage(originalUserInput);
+
+    const userMessageId = Date.now().toString();
+    const userMessage: Message = {
+      id: userMessageId,
+      role: 'user',
+      content: originalUserInput,
+      timestamp: new Date(),
+    };
+
+    setMessages((prev) => [...prev, userMessage]);
+    setInputValue('');
+    setError(null);
+
+    const detectedLanguage = await detectionPromise;
     console.log(`[Chatbot] User input language detected: ${detectedLanguage}`, originalUserInput);
-    
-    // Check if language is supported (only English and Amharic are supported)
+
     if (detectedLanguage === 'other') {
-      // Add user message to show what they tried to send
-      const userMessage: Message = {
-        id: Date.now().toString(),
-        role: 'user',
-        content: originalUserInput,
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, userMessage]);
-      setInputValue('');
-      
-      // Add error message after a delay to make it feel more natural
       setTimeout(() => {
         const errorMessage: Message = {
           id: (Date.now() + 1).toString(),
           role: 'assistant',
-          content: selectedLanguage === 'en' 
+          content: selectedLanguage === 'en'
             ? "I can only converse in English and Amharic. Please send your message in one of these languages."
             : "እኔ በእንግሊዘኛ እና በአማርኛ ብቻ መወያየት እችላለሁ። እባክዎ መልእክትዎን በእነዚህ ቋንቋዎች አንዱ ይላኩ።",
           timestamp: new Date(),
         };
         setMessages((prev) => [...prev, errorMessage]);
         setIsLoading(false);
-      }, 800); // 800ms delay to make it feel natural
-      
-      return; // Exit early - do NOT send to API
+      }, 800);
+      return;
     }
-    
+
+    setMessages((prev) =>
+      prev.map((msg) =>
+        msg.id === userMessageId
+          ? {
+              ...msg,
+              originalLanguage: detectedLanguage,
+              translations: {
+                ...(msg.translations || {}),
+                [detectedLanguage]: originalUserInput,
+              },
+            }
+          : msg
+      )
+    );
+
     // Translate to English if Amharic
     let queryForLLM = originalUserInput;
     if (detectedLanguage === 'am') {
@@ -213,27 +227,11 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
         console.log('[Chatbot] Translation result:', queryForLLM);
       } catch (err) {
         console.error('[Chatbot] Translation error:', err);
-        // Continue with original text if translation fails
         queryForLLM = originalUserInput;
       }
     } else {
       console.log('[Chatbot] English detected, no translation needed');
     }
-
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      role: 'user',
-      content: originalUserInput, // Store original user input
-      timestamp: new Date(),
-      originalLanguage: detectedLanguage, // Track original language
-      translations: {
-        [detectedLanguage]: originalUserInput, // Store original in translations cache
-      },
-    };
-
-    setMessages((prev) => [...prev, userMessage]);
-    setInputValue('');
-    setError(null);
 
     // Reset textarea height
     const textarea = document.querySelector('.chatbot-input') as HTMLTextAreaElement;
@@ -260,7 +258,107 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
     abortControllerRef.current = new AbortController();
 
     let currentContent = ''; // Accumulated English content from LLM
-    let translatedContent = ''; // Final translated (Amharic) content
+    const sentenceTerminators = new Set(['.', '?', '!', '\n']);
+    let processedChars = 0;
+    let translationQueue: string[] = [];
+    let translationProcessing = false;
+    let translatedOutput = '';
+
+    const updateAssistantMessage = (
+      content: string,
+      translationOverrides?: Partial<Message['translations']>
+    ) => {
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantMessageId
+            ? {
+                ...msg,
+                content,
+                translations: translationOverrides
+                  ? { ...msg.translations, ...translationOverrides }
+                  : msg.translations,
+              }
+            : msg
+        )
+      );
+    };
+
+    const buildTranslationPayload = () => {
+      const payload: Partial<Message['translations']> = { en: currentContent };
+      if (translatedOutput) {
+        payload.am = translatedOutput;
+      }
+      return payload;
+    };
+
+    const reflectTranslationState = (forcePlaceholder = false) => {
+      const pending =
+        processedChars < currentContent.length ||
+        translationQueue.length > 0 ||
+        translationProcessing;
+      let display = translatedOutput;
+      if (pending || forcePlaceholder) {
+        display = `${translatedOutput || ''} ...`.trim();
+      }
+      updateAssistantMessage(display || '...', buildTranslationPayload());
+    };
+
+    const processTranslationQueue = async (): Promise<void> => {
+      if (translationProcessing || translationQueue.length === 0) return;
+      translationProcessing = true;
+      const segment = translationQueue.shift()!;
+
+      try {
+        const translated = await translateEnglishToAmharicWithFormatting(segment);
+        translatedOutput += translated;
+      } catch (err) {
+        console.error('Translation error:', err);
+        translatedOutput += segment;
+      } finally {
+        translationProcessing = false;
+        reflectTranslationState();
+        if (translationQueue.length > 0) {
+          processTranslationQueue();
+        }
+      }
+    };
+
+    const queueSegment = (segment: string) => {
+      if (!segment.trim()) return;
+      translationQueue.push(segment);
+      processTranslationQueue();
+    };
+
+    const extractCompletedSegments = () => {
+      if (detectedLanguage !== 'am') return;
+      for (let i = processedChars; i < currentContent.length; i++) {
+        const char = currentContent[i];
+        if (sentenceTerminators.has(char)) {
+          const endIndex = i + 1;
+          const segment = currentContent.slice(processedChars, endIndex);
+          processedChars = endIndex;
+          queueSegment(segment);
+        }
+      }
+      reflectTranslationState(true);
+    };
+
+    const flushRemainingSegments = () => {
+      if (detectedLanguage !== 'am') return;
+      if (processedChars < currentContent.length) {
+        const segment = currentContent.slice(processedChars);
+        processedChars = currentContent.length;
+        queueSegment(segment);
+      }
+      reflectTranslationState(true);
+    };
+
+    const waitForTranslations = async () => {
+      if (detectedLanguage !== 'am') return;
+      while (translationProcessing || translationQueue.length > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+      }
+    };
 
     try {
       const requestBody = {
@@ -331,26 +429,11 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
               // Each "answer" field contains a chunk that should be ADDED to the previous content
               if (parsed.answer !== undefined && parsed.answer !== null) {
                 currentContent += parsed.answer;
-                setMessages((prev) =>
-                  prev.map((msg) =>
-                    msg.id === assistantMessageId
-                      ? {
-                          ...msg,
-                          content: currentContent,
-                          translations:
-                            detectedLanguage === 'am'
-                              ? {
-                                  ...msg.translations,
-                                  en: currentContent,
-                                }
-                              : {
-                                  ...msg.translations,
-                                  en: currentContent,
-                                },
-                        }
-                      : msg
-                  )
-                );
+                if (detectedLanguage === 'am') {
+                  extractCompletedSegments();
+                } else {
+                  updateAssistantMessage(currentContent, { en: currentContent });
+                }
               }
             } catch (e) {
               // Skip invalid JSON lines
@@ -362,26 +445,11 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
               const parsed = JSON.parse(line);
               if (parsed.answer !== undefined && parsed.answer !== null) {
                 currentContent += parsed.answer;
-                setMessages((prev) =>
-                  prev.map((msg) =>
-                    msg.id === assistantMessageId
-                      ? {
-                          ...msg,
-                          content: currentContent,
-                          translations:
-                            detectedLanguage === 'am'
-                              ? {
-                                  ...msg.translations,
-                                  en: currentContent,
-                                }
-                              : {
-                                  ...msg.translations,
-                                  en: currentContent,
-                                },
-                        }
-                      : msg
-                  )
-                );
+                if (detectedLanguage === 'am') {
+                  extractCompletedSegments();
+                } else {
+                  updateAssistantMessage(currentContent, { en: currentContent });
+                }
               }
             } catch (e) {
               // Not JSON, skip
@@ -392,46 +460,11 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
 
       if (currentContent) {
         if (detectedLanguage === 'am') {
-          try {
-            translatedContent = await translateEnglishToAmharicWithFormatting(currentContent);
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.id === assistantMessageId
-                  ? {
-                      ...msg,
-                      content: translatedContent,
-                      translations: {
-                        ...msg.translations,
-                        en: currentContent,
-                        am: translatedContent,
-                      },
-                    }
-                  : msg
-              )
-            );
-          } catch (err) {
-            console.error('Translation error:', err);
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.id === assistantMessageId ? { ...msg, content: currentContent } : msg
-              )
-            );
-          }
+          flushRemainingSegments();
+          await waitForTranslations();
+          reflectTranslationState();
         } else {
-          setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === assistantMessageId
-                ? {
-                    ...msg,
-                    content: currentContent,
-                    translations: {
-                      ...msg.translations,
-                      en: currentContent,
-                    },
-                  }
-                : msg
-            )
-          );
+          updateAssistantMessage(currentContent, { en: currentContent });
         }
       }
     } catch (err: any) {
@@ -734,14 +767,14 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
               onClick={sendMessage}
               disabled={!inputValue.trim() || isLoading}
               title={isLoading ? 'Sending...' : 'Send message (Enter)'}
+              aria-live="polite"
             >
               {isLoading ? (
-                <span className="send-button-content">
+                <span className="send-button-content" aria-label="Sending message">
                   <span className="spinner"></span>
-                  <span>Sending</span>
                 </span>
               ) : (
-                <span className="send-button-content">
+                <span className="send-button-content" aria-hidden="true">
                   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <line x1="22" y1="2" x2="11" y2="13"></line>
                     <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
