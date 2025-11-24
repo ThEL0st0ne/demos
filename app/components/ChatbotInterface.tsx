@@ -126,6 +126,39 @@ const INITIAL_MESSAGES = {
   am: "ሰላም! የቺፕቺፕ ረዳት ነኝ። ዛሬ እንዴት ልረዳዎት እችላለሁ - የሻጭ ማዋቀር፣ የቡድን ግዢ፣ የሱፐር-ግሩፕ መሪዎች፣ ሱኮች፣ ምግብ ቤቶች፣ ክፍያዎች ወይም ማድረስ?"
 };
 
+const normalizeMarkdown = (text: string) => {
+  if (!text) return text;
+  let formatted = text.replace(/\r\n/g, '\n');
+
+  formatted = formatted.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n');
+
+  const lines = formatted.split('\n');
+  const normalizedLines: string[] = [];
+
+  lines.forEach((line) => {
+    const trimmed = line.trimEnd();
+
+    if (!trimmed) {
+      if (normalizedLines[normalizedLines.length - 1] !== '') {
+        normalizedLines.push('');
+      }
+      return;
+    }
+
+    if (/^(\d+\.\s+|[-*]\s+)/.test(trimmed)) {
+      if (normalizedLines.length && normalizedLines[normalizedLines.length - 1] !== '') {
+        normalizedLines.push('');
+      }
+      normalizedLines.push(trimmed);
+      return;
+    }
+
+    normalizedLines.push(trimmed);
+  });
+
+  return normalizedLines.join('\n').trimEnd();
+};
+
 function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState('');
@@ -258,9 +291,10 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
     abortControllerRef.current = new AbortController();
 
     let currentContent = ''; // Accumulated English content from LLM
-    const sentenceTerminators = new Set(['.', '?', '!', '\n']);
     let processedChars = 0;
-    let translationQueue: string[] = [];
+
+    type TranslationSegment = { text: string; suffix: string };
+    let translationQueue: TranslationSegment[] = [];
     let translationProcessing = false;
     let translatedOutput = '';
 
@@ -268,14 +302,28 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
       content: string,
       translationOverrides?: Partial<Message['translations']>
     ) => {
+      const normalizedContent =
+        content && content !== '...' ? normalizeMarkdown(content) : content;
+      const normalizedTranslations = translationOverrides
+        ? (() => {
+            const result: Partial<Message['translations']> = {};
+            Object.entries(translationOverrides).forEach(([key, value]) => {
+              if (value) {
+                result[key as LanguageCode] = normalizeMarkdown(value);
+              }
+            });
+            return result;
+          })()
+        : undefined;
+
       setMessages((prev) =>
         prev.map((msg) =>
           msg.id === assistantMessageId
             ? {
                 ...msg,
-                content,
-                translations: translationOverrides
-                  ? { ...msg.translations, ...translationOverrides }
+                content: normalizedContent,
+                translations: normalizedTranslations
+                  ? { ...msg.translations, ...normalizedTranslations }
                   : msg.translations,
               }
             : msg
@@ -309,11 +357,11 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
       const segment = translationQueue.shift()!;
 
       try {
-        const translated = await translateEnglishToAmharicWithFormatting(segment);
-        translatedOutput += translated;
+        const translated = await translateEnglishToAmharicWithFormatting(segment.text);
+        translatedOutput += translated + segment.suffix;
       } catch (err) {
         console.error('Translation error:', err);
-        translatedOutput += segment;
+        translatedOutput += segment.text + segment.suffix;
       } finally {
         translationProcessing = false;
         reflectTranslationState();
@@ -324,21 +372,30 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
     };
 
     const queueSegment = (segment: string) => {
-      if (!segment.trim()) return;
-      translationQueue.push(segment);
+      if (!segment) return;
+      const suffixMatch = segment.match(/(\s+)$/);
+      const suffix = suffixMatch ? suffixMatch[0] : '';
+      const text = suffix ? segment.slice(0, -suffix.length) : segment;
+
+      if (!text.trim()) {
+        translatedOutput += suffix;
+        reflectTranslationState();
+        return;
+      }
+
+      translationQueue.push({ text, suffix });
       processTranslationQueue();
     };
 
     const extractCompletedSegments = () => {
       if (detectedLanguage !== 'am') return;
-      for (let i = processedChars; i < currentContent.length; i++) {
-        const char = currentContent[i];
-        if (sentenceTerminators.has(char)) {
-          const endIndex = i + 1;
-          const segment = currentContent.slice(processedChars, endIndex);
-          processedChars = endIndex;
-          queueSegment(segment);
-        }
+      let nextIndex = currentContent.indexOf('\n', processedChars);
+      while (nextIndex !== -1) {
+        const endIndex = nextIndex + 1;
+        const segment = currentContent.slice(processedChars, endIndex);
+        processedChars = endIndex;
+        queueSegment(segment);
+        nextIndex = currentContent.indexOf('\n', processedChars);
       }
       reflectTranslationState(true);
     };
