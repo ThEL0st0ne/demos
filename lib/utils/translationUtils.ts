@@ -2,6 +2,7 @@
 // The actual Google Translate API key is stored server-side in environment variables
 
 export type LanguageCode = 'am' | 'en';
+export type TranslationProvider = 'google' | 'camb';
 export type DetectedLanguage = LanguageCode | 'other';
 
 async function detectLanguageWithAPI(text: string): Promise<string | null> {
@@ -138,7 +139,8 @@ export async function detectLanguage(text: string): Promise<DetectedLanguage> {
 export async function translate(
   text: string,
   targetLang: LanguageCode,
-  sourceLang?: LanguageCode
+  sourceLang?: LanguageCode,
+  provider: TranslationProvider = 'google'
 ): Promise<string> {
   if (!text || text.trim().length === 0) {
     return text;
@@ -154,6 +156,7 @@ export async function translate(
         text,
         targetLang,
         sourceLang,
+        provider,
       }),
     });
 
@@ -175,12 +178,18 @@ export async function translate(
   }
 }
 
-export async function translateAmharicToEnglish(text: string): Promise<string> {
-  return translate(text, 'en', 'am');
+export async function translateAmharicToEnglish(
+  text: string,
+  provider: TranslationProvider = 'google'
+): Promise<string> {
+  return translate(text, 'en', 'am', provider);
 }
 
-export async function translateEnglishToAmharic(text: string): Promise<string> {
-  return translate(text, 'am', 'en');
+export async function translateEnglishToAmharic(
+  text: string,
+  provider: TranslationProvider = 'google'
+): Promise<string> {
+  return translate(text, 'am', 'en', provider);
 }
 
 function convertUrlsToMarkdownLinks(text: string): string {
@@ -196,7 +205,10 @@ function convertUrlsToMarkdownLinks(text: string): string {
   });
 }
 
-export async function translateEnglishToAmharicWithFormatting(text: string): Promise<string> {
+export async function translateEnglishToAmharicWithFormatting(
+  text: string,
+  provider: TranslationProvider = 'google'
+): Promise<string> {
   if (!text || text.trim().length === 0) {
     return text;
   }
@@ -244,7 +256,7 @@ export async function translateEnglishToAmharicWithFormatting(text: string): Pro
     }
 
     if (boldMatches.length === 0 && linkMatches.length === 0) {
-      const translated = await translate(line, 'am', 'en');
+      const translated = await translate(line, 'am', 'en', provider);
       translatedLines.push(translated);
     } else {
       let translatedLine = '';
@@ -259,17 +271,17 @@ export async function translateEnglishToAmharicWithFormatting(text: string): Pro
         if (matchItem.start > lastIndex) {
           const beforeText = line.substring(lastIndex, matchItem.start);
           if (beforeText.trim()) {
-            translatedLine += await translate(beforeText, 'am', 'en');
+            translatedLine += await translate(beforeText, 'am', 'en', provider);
           } else {
             translatedLine += beforeText;
           }
         }
 
         if (matchItem.type === 'link') {
-          const translatedLinkText = await translate(matchItem.text, 'am', 'en');
+          const translatedLinkText = await translate(matchItem.text, 'am', 'en', provider);
           translatedLine += `[${translatedLinkText}](${matchItem.url})`;
         } else {
-          const translatedBoldText = await translate(matchItem.text, 'am', 'en');
+          const translatedBoldText = await translate(matchItem.text, 'am', 'en', provider);
           translatedLine += `**${translatedBoldText}**`;
         }
 
@@ -279,7 +291,7 @@ export async function translateEnglishToAmharicWithFormatting(text: string): Pro
       if (lastIndex < line.length) {
         const afterText = line.substring(lastIndex);
         if (afterText.trim()) {
-          translatedLine += await translate(afterText, 'am', 'en');
+          translatedLine += await translate(afterText, 'am', 'en', provider);
         } else {
           translatedLine += afterText;
         }

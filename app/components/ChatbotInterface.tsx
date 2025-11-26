@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useRef, useEffect } from 'react';
-import { detectLanguage, detectLanguageSync, translateAmharicToEnglish, translateEnglishToAmharicWithFormatting, LanguageCode, DetectedLanguage } from '@/lib/utils/translationUtils';
+import { detectLanguage, detectLanguageSync, translateAmharicToEnglish, translateEnglishToAmharicWithFormatting, LanguageCode, DetectedLanguage, TranslationProvider } from '@/lib/utils/translationUtils';
 
 // Helper function to render markdown text (bold, links, etc.)
 const renderMarkdown = (text: string) => {
@@ -159,6 +159,13 @@ const normalizeMarkdown = (text: string) => {
   return normalizedLines.join('\n').trimEnd();
 };
 
+const fixLatexContent = (text: string) => {
+  if (!text) return text;
+  return text.replace(/\\\\(?=[()[\]{}\\]|[a-zA-Z])/g, '\\');
+};
+
+const formatResponseContent = (text: string) => normalizeMarkdown(fixLatexContent(text));
+
 function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState('');
@@ -169,6 +176,7 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
   const [showLanguageDropdown, setShowLanguageDropdown] = useState(false);
   const [isTranslating, setIsTranslating] = useState(false);
   const [initialTimestamp, setInitialTimestamp] = useState('');
+  const [translationProvider, setTranslationProvider] = useState<TranslationProvider>('google');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const languageDropdownRef = useRef<HTMLDivElement>(null);
@@ -204,6 +212,7 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
     setIsLoading(true);
 
     const detectionPromise = detectLanguage(originalUserInput);
+    const providerForRequest = translationProvider;
 
     const userMessageId = Date.now().toString();
     const userMessage: Message = {
@@ -256,7 +265,7 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
     if (detectedLanguage === 'am') {
       console.log('[Chatbot] Translating Amharic to English...');
       try {
-        queryForLLM = await translateAmharicToEnglish(originalUserInput);
+        queryForLLM = await translateAmharicToEnglish(originalUserInput, providerForRequest);
         console.log('[Chatbot] Translation result:', queryForLLM);
       } catch (err) {
         console.error('[Chatbot] Translation error:', err);
@@ -291,25 +300,23 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
     abortControllerRef.current = new AbortController();
 
     let currentContent = ''; // Accumulated English content from LLM
-    let processedChars = 0;
-
-    type TranslationSegment = { text: string; suffix: string };
-    let translationQueue: TranslationSegment[] = [];
-    let translationProcessing = false;
     let translatedOutput = '';
+    const shouldTranslateAssistantResponse = detectedLanguage === 'am';
 
     const updateAssistantMessage = (
       content: string,
       translationOverrides?: Partial<Message['translations']>
     ) => {
+      const trimmedContent = content?.trim();
+      const isPlaceholder = trimmedContent === '...';
       const normalizedContent =
-        content && content !== '...' ? normalizeMarkdown(content) : content;
+        content && !isPlaceholder ? formatResponseContent(content) : content;
       const normalizedTranslations = translationOverrides
         ? (() => {
             const result: Partial<Message['translations']> = {};
             Object.entries(translationOverrides).forEach(([key, value]) => {
               if (value) {
-                result[key as LanguageCode] = normalizeMarkdown(value);
+                result[key as LanguageCode] = formatResponseContent(value);
               }
             });
             return result;
@@ -331,89 +338,13 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
       );
     };
 
-    const buildTranslationPayload = () => {
-      const payload: Partial<Message['translations']> = { en: currentContent };
-      if (translatedOutput) {
-        payload.am = translatedOutput;
-      }
-      return payload;
-    };
-
-    const reflectTranslationState = (forcePlaceholder = false) => {
-      const pending =
-        processedChars < currentContent.length ||
-        translationQueue.length > 0 ||
-        translationProcessing;
-      let display = translatedOutput;
-      if (pending || forcePlaceholder) {
-        display = `${translatedOutput || ''} ...`.trim();
-      }
-      updateAssistantMessage(display || '...', buildTranslationPayload());
-    };
-
-    const processTranslationQueue = async (): Promise<void> => {
-      if (translationProcessing || translationQueue.length === 0) return;
-      translationProcessing = true;
-      const segment = translationQueue.shift()!;
-
-      try {
-        const translated = await translateEnglishToAmharicWithFormatting(segment.text);
-        translatedOutput += translated + segment.suffix;
-      } catch (err) {
-        console.error('Translation error:', err);
-        translatedOutput += segment.text + segment.suffix;
-      } finally {
-        translationProcessing = false;
-        reflectTranslationState();
-        if (translationQueue.length > 0) {
-          processTranslationQueue();
-        }
-      }
-    };
-
-    const queueSegment = (segment: string) => {
-      if (!segment) return;
-      const suffixMatch = segment.match(/(\s+)$/);
-      const suffix = suffixMatch ? suffixMatch[0] : '';
-      const text = suffix ? segment.slice(0, -suffix.length) : segment;
-
-      if (!text.trim()) {
-        translatedOutput += suffix;
-        reflectTranslationState();
-        return;
-      }
-
-      translationQueue.push({ text, suffix });
-      processTranslationQueue();
-    };
-
-    const extractCompletedSegments = () => {
-      if (detectedLanguage !== 'am') return;
-      let nextIndex = currentContent.indexOf('\n', processedChars);
-      while (nextIndex !== -1) {
-        const endIndex = nextIndex + 1;
-        const segment = currentContent.slice(processedChars, endIndex);
-        processedChars = endIndex;
-        queueSegment(segment);
-        nextIndex = currentContent.indexOf('\n', processedChars);
-      }
-      reflectTranslationState(true);
-    };
-
-    const flushRemainingSegments = () => {
-      if (detectedLanguage !== 'am') return;
-      if (processedChars < currentContent.length) {
-        const segment = currentContent.slice(processedChars);
-        processedChars = currentContent.length;
-        queueSegment(segment);
-      }
-      reflectTranslationState(true);
-    };
-
-    const waitForTranslations = async () => {
-      if (detectedLanguage !== 'am') return;
-      while (translationProcessing || translationQueue.length > 0) {
-        await new Promise((resolve) => setTimeout(resolve, 40));
+    const reflectAssistantState = () => {
+      if (shouldTranslateAssistantResponse) {
+        updateAssistantMessage('...', {
+          en: currentContent,
+        });
+      } else {
+        updateAssistantMessage(currentContent || '...', { en: currentContent });
       }
     };
 
@@ -486,11 +417,7 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
               // Each "answer" field contains a chunk that should be ADDED to the previous content
               if (parsed.answer !== undefined && parsed.answer !== null) {
                 currentContent += parsed.answer;
-                if (detectedLanguage === 'am') {
-                  extractCompletedSegments();
-                } else {
-                  updateAssistantMessage(currentContent, { en: currentContent });
-                }
+                reflectAssistantState();
               }
             } catch (e) {
               // Skip invalid JSON lines
@@ -502,11 +429,7 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
               const parsed = JSON.parse(line);
               if (parsed.answer !== undefined && parsed.answer !== null) {
                 currentContent += parsed.answer;
-                if (detectedLanguage === 'am') {
-                  extractCompletedSegments();
-                } else {
-                  updateAssistantMessage(currentContent, { en: currentContent });
-                }
+                reflectAssistantState();
               }
             } catch (e) {
               // Not JSON, skip
@@ -516,10 +439,24 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
       }
 
       if (currentContent) {
-        if (detectedLanguage === 'am') {
-          flushRemainingSegments();
-          await waitForTranslations();
-          reflectTranslationState();
+        if (shouldTranslateAssistantResponse) {
+          try {
+            translatedOutput = await translateEnglishToAmharicWithFormatting(
+              currentContent,
+              providerForRequest
+            );
+            updateAssistantMessage(translatedOutput, {
+              en: currentContent,
+              am: translatedOutput,
+            });
+          } catch (err) {
+            console.error('Translation error:', err);
+            const translationUnavailableMessage =
+              selectedLanguage === 'am'
+                ? 'የመልሱን ትርጉም ማሳየት አልተቻለም። እባክዎ በእንግሊዘኛ ይመልከቱ።'
+                : 'Translation unavailable. Please switch to English to view.';
+            updateAssistantMessage(translationUnavailableMessage, { en: currentContent });
+          }
         } else {
           updateAssistantMessage(currentContent, { en: currentContent });
         }
@@ -593,9 +530,9 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
       // Translate the message
       let translatedText = message.content;
       if (targetLang === 'en') {
-        translatedText = await translateAmharicToEnglish(message.content);
+        translatedText = await translateAmharicToEnglish(message.content, translationProvider);
       } else {
-        translatedText = await translateEnglishToAmharicWithFormatting(message.content);
+        translatedText = await translateEnglishToAmharicWithFormatting(message.content, translationProvider);
       }
 
       // Store original content in cache
@@ -646,33 +583,55 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
             <img src="/logo-red.webp" alt="ChipChip" className="logo-image" />
           </div>
           <div className="header-right">
-            <div className="language-selector" ref={languageDropdownRef}>
-              <button
-                className="language-button"
-                onClick={() => setShowLanguageDropdown(!showLanguageDropdown)}
-                title="Select Language"
-              >
-                <span>{selectedLanguage === 'en' ? 'EN' : 'አማርኛ'}</span>
-                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M3 4.5L6 7.5L9 4.5" />
-                </svg>
-              </button>
-              {showLanguageDropdown && (
-                <div className="language-dropdown">
-                  <button
-                    className={`language-option ${selectedLanguage === 'en' ? 'active' : ''}`}
-                    onClick={() => handleLanguageChange('en')}
-                  >
-                    English
-                  </button>
-                  <button
-                    className={`language-option ${selectedLanguage === 'am' ? 'active' : ''}`}
-                    onClick={() => handleLanguageChange('am')}
-                  >
-                    አማርኛ
-                  </button>
+            <div className="selector-cluster">
+              <div className="language-selector" ref={languageDropdownRef}>
+                <button
+                  className="language-button"
+                  onClick={() => setShowLanguageDropdown(!showLanguageDropdown)}
+                  title="Select Language"
+                >
+                  <span>{selectedLanguage === 'en' ? 'EN' : 'አማርኛ'}</span>
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M3 4.5L6 7.5L9 4.5" />
+                  </svg>
+                </button>
+                {showLanguageDropdown && (
+                  <div className="language-dropdown">
+                    <button
+                      className={`language-option ${selectedLanguage === 'en' ? 'active' : ''}`}
+                      onClick={() => handleLanguageChange('en')}
+                    >
+                      English
+                    </button>
+                    <button
+                      className={`language-option ${selectedLanguage === 'am' ? 'active' : ''}`}
+                      onClick={() => handleLanguageChange('am')}
+                    >
+                      አማርኛ
+                    </button>
+                  </div>
+                )}
+              </div>
+              <div className="translation-provider">
+                <div className="provider-toggle" role="group" aria-label="Translator">
+                  {([
+                    { label: 'Google', value: 'google', hint: 'Best for general text' },
+                    { label: 'Camb.ai', value: 'camb', hint: 'Optimized for Amharic ↔ English' },
+                  ] as Array<{ label: string; value: TranslationProvider; hint: string }>).map((provider) => (
+                    <button
+                      key={provider.value}
+                      type="button"
+                      className={`provider-chip ${translationProvider === provider.value ? 'active' : ''}`}
+                      onClick={() => setTranslationProvider(provider.value)}
+                      aria-pressed={translationProvider === provider.value}
+                      title={provider.hint}
+                    >
+                      <span className="chip-label">{provider.label}</span>
+                      {translationProvider === provider.value && <span className="chip-dot" aria-hidden />}
+                    </button>
+                  ))}
                 </div>
-              )}
+              </div>
             </div>
             <div className="header-buttons">
               {onNavigateToVoice && (
@@ -895,6 +854,75 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
 
         .language-selector {
           position: relative;
+        }
+
+        .selector-cluster {
+          display: flex;
+          align-items: flex-end;
+          gap: 16px;
+        }
+
+        .selector-label {
+          font-size: 10px;
+          font-weight: 700;
+          letter-spacing: 0.1em;
+          text-transform: uppercase;
+          color: #9ca3af;
+          margin-bottom: 4px;
+          display: inline-block;
+        }
+
+        .translation-provider {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+        }
+
+        .provider-toggle {
+          display: inline-flex;
+          background: #f8fafc;
+          border: 1px solid #e2e8f0;
+          border-radius: 999px;
+          padding: 3px;
+          gap: 4px;
+        }
+
+        .provider-chip {
+          border: none;
+          border-radius: 999px;
+          padding: 6px 14px;
+          font-size: 13px;
+          font-weight: 600;
+          color: #475569;
+          background: transparent;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          transition: all 0.2s ease;
+        }
+
+        .provider-chip:hover {
+          background: rgba(220, 38, 38, 0.08);
+          color: #b91c1c;
+        }
+
+        .provider-chip.active {
+          background: white;
+          color: #dc2626;
+          box-shadow: 0 4px 12px rgba(220, 38, 38, 0.15);
+        }
+
+        .chip-label {
+          line-height: 1;
+        }
+
+        .chip-dot {
+          width: 8px;
+          height: 8px;
+          border-radius: 50%;
+          background: radial-gradient(circle, #f97316 0%, #dc2626 80%);
+          display: inline-block;
         }
 
         .language-button {
@@ -1318,6 +1346,17 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
 
           .chatbot-title {
             font-size: 1.4rem;
+          }
+
+          .selector-cluster {
+            flex-direction: column;
+            align-items: stretch;
+            width: 100%;
+          }
+
+          .provider-toggle {
+            width: 100%;
+            justify-content: space-between;
           }
 
           .message {
