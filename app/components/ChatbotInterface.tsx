@@ -108,7 +108,7 @@ interface TranslationOption {
 }
 
 const TRANSLATION_OPTIONS: TranslationOption[] = [
-  { id: 'option1', label: 'Option 1', provider: 'google' },
+  // { id: 'option1', label: 'Option 1', provider: 'google' },
   {
     id: 'option2',
     label: 'Option 2',
@@ -202,7 +202,7 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
   const [showLanguageDropdown, setShowLanguageDropdown] = useState(false);
   const [isTranslating, setIsTranslating] = useState(false);
   const [initialTimestamp, setInitialTimestamp] = useState('');
-  const [selectedTranslationOption, setSelectedTranslationOption] = useState<TranslationOptionId>('option1');
+  const [selectedTranslationOption, setSelectedTranslationOption] = useState<TranslationOptionId>('option2');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const languageDropdownRef = useRef<HTMLDivElement>(null);
