@@ -2,6 +2,7 @@
 // The actual Google Translate API key is stored server-side in environment variables
 
 export type LanguageCode = 'am' | 'en';
+export type TranslationProvider = 'google' | 'camb' | 'backenster';
 export type DetectedLanguage = LanguageCode | 'other';
 
 async function detectLanguageWithAPI(text: string): Promise<string | null> {
@@ -138,7 +139,8 @@ export async function detectLanguage(text: string): Promise<DetectedLanguage> {
 export async function translate(
   text: string,
   targetLang: LanguageCode,
-  sourceLang?: LanguageCode
+  sourceLang?: LanguageCode,
+  provider: TranslationProvider = 'google'
 ): Promise<string> {
   if (!text || text.trim().length === 0) {
     return text;
@@ -154,6 +156,7 @@ export async function translate(
         text,
         targetLang,
         sourceLang,
+        provider,
       }),
     });
 
@@ -175,12 +178,18 @@ export async function translate(
   }
 }
 
-export async function translateAmharicToEnglish(text: string): Promise<string> {
-  return translate(text, 'en', 'am');
+export async function translateAmharicToEnglish(
+  text: string,
+  provider: TranslationProvider = 'google'
+): Promise<string> {
+  return translate(text, 'en', 'am', provider);
 }
 
-export async function translateEnglishToAmharic(text: string): Promise<string> {
-  return translate(text, 'am', 'en');
+export async function translateEnglishToAmharic(
+  text: string,
+  provider: TranslationProvider = 'google'
+): Promise<string> {
+  return translate(text, 'am', 'en', provider);
 }
 
 function convertUrlsToMarkdownLinks(text: string): string {
@@ -196,99 +205,15 @@ function convertUrlsToMarkdownLinks(text: string): string {
   });
 }
 
-export async function translateEnglishToAmharicWithFormatting(text: string): Promise<string> {
+export async function translateEnglishToAmharicWithFormatting(
+  text: string,
+  provider: TranslationProvider = 'google'
+): Promise<string> {
   if (!text || text.trim().length === 0) {
     return text;
   }
 
   const textWithLinks = convertUrlsToMarkdownLinks(text);
-
-  const lines = textWithLinks.split(/\r?\n/);
-  const translatedLines: string[] = [];
-
-  for (const line of lines) {
-    if (!line.trim()) {
-      translatedLines.push('');
-      continue;
-    }
-
-    const linkRegex = /\[([^\]]+)\]\(([^\)]+)\)/g;
-    const linkMatches: Array<{ start: number; end: number; text: string; url: string }> = [];
-    let linkMatch: RegExpExecArray | null;
-
-    while ((linkMatch = linkRegex.exec(line)) !== null) {
-      linkMatches.push({
-        start: linkMatch.index,
-        end: linkMatch.index + linkMatch[0].length,
-        text: linkMatch[1],
-        url: linkMatch[2],
-      });
-    }
-
-    const boldRegex = /\*\*([^*]+?)\*\*/g;
-    const boldMatches: Array<{ start: number; end: number; text: string }> = [];
-    
-    boldRegex.lastIndex = 0;
-    let boldMatch: RegExpExecArray | null;
-    while ((boldMatch = boldRegex.exec(line)) !== null) {
-      const isInsideLink = linkMatches.some(link => 
-        boldMatch!.index >= link.start && boldMatch!.index < link.end
-      );
-      if (!isInsideLink) {
-        boldMatches.push({
-          start: boldMatch.index,
-          end: boldMatch.index + boldMatch[0].length,
-          text: boldMatch[1],
-        });
-      }
-    }
-
-    if (boldMatches.length === 0 && linkMatches.length === 0) {
-      const translated = await translate(line, 'am', 'en');
-      translatedLines.push(translated);
-    } else {
-      let translatedLine = '';
-      let lastIndex = 0;
-
-      const allMatches: Array<{ start: number; end: number; type: 'link' | 'bold'; text: string; url?: string }> = [
-        ...linkMatches.map(m => ({ ...m, type: 'link' as const })),
-        ...boldMatches.map(m => ({ ...m, type: 'bold' as const }))
-      ].sort((a, b) => a.start - b.start);
-
-      for (const matchItem of allMatches) {
-        if (matchItem.start > lastIndex) {
-          const beforeText = line.substring(lastIndex, matchItem.start);
-          if (beforeText.trim()) {
-            translatedLine += await translate(beforeText, 'am', 'en');
-          } else {
-            translatedLine += beforeText;
-          }
-        }
-
-        if (matchItem.type === 'link') {
-          const translatedLinkText = await translate(matchItem.text, 'am', 'en');
-          translatedLine += `[${translatedLinkText}](${matchItem.url})`;
-        } else {
-          const translatedBoldText = await translate(matchItem.text, 'am', 'en');
-          translatedLine += `**${translatedBoldText}**`;
-        }
-
-        lastIndex = matchItem.end;
-      }
-
-      if (lastIndex < line.length) {
-        const afterText = line.substring(lastIndex);
-        if (afterText.trim()) {
-          translatedLine += await translate(afterText, 'am', 'en');
-        } else {
-          translatedLine += afterText;
-        }
-      }
-
-      translatedLines.push(translatedLine);
-    }
-  }
-
-  return translatedLines.join('\n');
+  return translate(textWithLinks, 'am', 'en', provider);
 }
 
