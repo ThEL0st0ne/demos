@@ -93,11 +93,37 @@ const renderMarkdown = (text: string) => {
   return <>{parts}</>;
 };
 
-// API Configuration - hardcoded in code as requested
-const API_URL = 'https://xpectrum-main-app-prod-cocfr.ondigitalocean.app/api/v1/chat-messages';
-// TODO: Replace {api_key} with your actual API key
-const API_KEY = 'app-jPCNQKS3Vs6nwDE09wQB501V';
+// API Configuration - server-side route hides API keys
+const API_URL = '/api/chat-messages';
 const USER_ID = 'abc-123';
+
+type TranslationOptionId = 'option1' | 'option2' | 'option3' | 'option4';
+
+interface TranslationOption {
+  id: TranslationOptionId;
+  label: string;
+  provider: TranslationProvider;
+  workflow?: string;
+  description?: string;
+}
+
+const TRANSLATION_OPTIONS: TranslationOption[] = [
+  { id: 'option1', label: 'Option 1', provider: 'google' },
+  {
+    id: 'option2',
+    label: 'Option 2',
+    provider: 'google',
+    workflow: 'general_assistant',
+    description: 'Server handles translation',
+  },
+  // { id: 'option2', label: 'Option 2', provider: 'camb' },
+  // {
+  //   id: 'option4',
+  //   label: 'Option 4',
+  //   provider: 'backenster',
+  //   description: 'Client handles translation via Backenster',
+  // },
+];
 
 interface Message {
   id: string;
@@ -176,10 +202,16 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
   const [showLanguageDropdown, setShowLanguageDropdown] = useState(false);
   const [isTranslating, setIsTranslating] = useState(false);
   const [initialTimestamp, setInitialTimestamp] = useState('');
-  const [translationProvider, setTranslationProvider] = useState<TranslationProvider>('google');
+  const [selectedTranslationOption, setSelectedTranslationOption] = useState<TranslationOptionId>('option1');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const languageDropdownRef = useRef<HTMLDivElement>(null);
+
+  const selectedTranslation =
+    TRANSLATION_OPTIONS.find((option) => option.id === selectedTranslationOption) ?? TRANSLATION_OPTIONS[0];
+  const translationProvider = selectedTranslation.provider;
+  const activeWorkflow = selectedTranslation.workflow;
+  const isWorkflowSelected = Boolean(activeWorkflow);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -213,6 +245,7 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
 
     const detectionPromise = detectLanguage(originalUserInput);
     const providerForRequest = translationProvider;
+    const userTranslationProvider: TranslationProvider = 'google';
 
     const userMessageId = Date.now().toString();
     const userMessage: Message = {
@@ -261,17 +294,19 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
     );
 
     // Translate to English if Amharic
+    const shouldHandleClientTranslations = !isWorkflowSelected;
+
     let queryForLLM = originalUserInput;
-    if (detectedLanguage === 'am') {
-      console.log('[Chatbot] Translating Amharic to English...');
+    if (shouldHandleClientTranslations && detectedLanguage === 'am') {
+      console.log('[Chatbot] Translating Amharic to English (Google-only)...');
       try {
-        queryForLLM = await translateAmharicToEnglish(originalUserInput, providerForRequest);
+        queryForLLM = await translateAmharicToEnglish(originalUserInput, userTranslationProvider);
         console.log('[Chatbot] Translation result:', queryForLLM);
       } catch (err) {
         console.error('[Chatbot] Translation error:', err);
         queryForLLM = originalUserInput;
       }
-    } else {
+    } else if (detectedLanguage === 'en') {
       console.log('[Chatbot] English detected, no translation needed');
     }
 
@@ -286,7 +321,7 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
     const assistantMessage: Message = {
       id: assistantMessageId,
       role: 'assistant',
-      content: '',
+      content: '...',
       timestamp: new Date(),
     };
     setMessages((prev) => [...prev, assistantMessage]);
@@ -301,7 +336,7 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
 
     let currentContent = ''; // Accumulated English content from LLM
     let translatedOutput = '';
-    const shouldTranslateAssistantResponse = detectedLanguage === 'am';
+    const shouldTranslateAssistantResponse = shouldHandleClientTranslations && detectedLanguage === 'am';
 
     const updateAssistantMessage = (
       content: string,
@@ -340,17 +375,21 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
 
     const reflectAssistantState = () => {
       if (shouldTranslateAssistantResponse) {
-        updateAssistantMessage('...', {
-          en: currentContent,
-        });
-      } else {
-        updateAssistantMessage(currentContent || '...', { en: currentContent });
+        if (!currentContent) {
+          updateAssistantMessage('...');
+        }
+        return;
       }
+      updateAssistantMessage(currentContent || '...');
     };
 
     try {
       const requestBody = {
-        inputs: {},
+        inputs: isWorkflowSelected
+          ? {
+              workflow: activeWorkflow,
+            }
+          : {},
         query: queryForLLM, // Use translated query for LLM
         response_mode: 'streaming',
         conversation_id: conversationId || '',
@@ -361,7 +400,6 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
       const response = await fetch(API_URL, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${API_KEY}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(requestBody),
@@ -369,73 +407,21 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
       });
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
-        throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+        throw new Error(errorData.error || errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
       }
 
-      // Handle streaming response
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-
-      if (!reader) {
-        throw new Error('No response body');
+      // Handle non-streaming JSON response
+      const data = await response.json();
+      
+      // Extract conversation_id if present
+      if (data.conversation_id) {
+        setConversationId(data.conversation_id);
       }
 
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || ''; // Keep incomplete line in buffer
-
-        for (const line of lines) {
-          if (line.trim() === '') continue;
-
-          // Handle Server-Sent Events (SSE) format - matching chatbot_llm.py implementation
-          if (line.startsWith('data:')) {
-            const data = line.slice(5).trim(); // Remove 'data:' prefix and trim
-
-            if (data === '[DONE]' || data === '') {
-              continue;
-            }
-
-            try {
-              const parsed = JSON.parse(data);
-              
-              // Extract conversation_id if present (like chatbot_llm.py line 386-388)
-              // Always update if API returns one - this ensures conversation persists across language switches
-              // The API will return the same conversation_id we sent, maintaining continuity
-              if (parsed.conversation_id) {
-                setConversationId(parsed.conversation_id);
-              }
-
-              // Accumulate answer chunks - matching chatbot_llm.py line 407-411
-              // Each "answer" field contains a chunk that should be ADDED to the previous content
-              if (parsed.answer !== undefined && parsed.answer !== null) {
-                currentContent += parsed.answer;
-                reflectAssistantState();
-              }
-            } catch (e) {
-              // Skip invalid JSON lines
-              console.warn('Failed to parse SSE data:', data, e);
-            }
-          } else if (line.trim()) {
-            // Try to parse as direct JSON (non-SSE format) - fallback
-            try {
-              const parsed = JSON.parse(line);
-              if (parsed.answer !== undefined && parsed.answer !== null) {
-                currentContent += parsed.answer;
-                reflectAssistantState();
-              }
-            } catch (e) {
-              // Not JSON, skip
-            }
-          }
-        }
+      // Get the complete answer
+      if (data.answer) {
+        currentContent = data.answer;
       }
 
       if (currentContent) {
@@ -458,7 +444,7 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
             updateAssistantMessage(translationUnavailableMessage, { en: currentContent });
           }
         } else {
-          updateAssistantMessage(currentContent, { en: currentContent });
+          updateAssistantMessage(currentContent);
         }
       }
     } catch (err: any) {
@@ -505,6 +491,10 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
   };
 
   const translateMessage = async (messageId: string, targetLang: LanguageCode) => {
+    if (isWorkflowSelected) {
+      return;
+    }
+
     const message = messages.find(m => m.id === messageId);
     if (!message || isTranslating) return;
 
@@ -613,23 +603,22 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
                 )}
               </div>
               <div className="translation-provider">
-                <div className="provider-toggle" role="group" aria-label="Translator">
-                  {([
-                    { label: 'Google', value: 'google', hint: 'Best for general text' },
-                    { label: 'Camb.ai', value: 'camb', hint: 'Optimized for Amharic ↔ English' },
-                  ] as Array<{ label: string; value: TranslationProvider; hint: string }>).map((provider) => (
-                    <button
-                      key={provider.value}
-                      type="button"
-                      className={`provider-chip ${translationProvider === provider.value ? 'active' : ''}`}
-                      onClick={() => setTranslationProvider(provider.value)}
-                      aria-pressed={translationProvider === provider.value}
-                      title={provider.hint}
-                    >
-                      <span className="chip-label">{provider.label}</span>
-                      {translationProvider === provider.value && <span className="chip-dot" aria-hidden />}
-                    </button>
-                  ))}
+                <div className="provider-dropdown">
+                  <select
+                    id="translation-option"
+                    className="provider-select"
+                    aria-label="Translation option"
+                    value={selectedTranslationOption}
+                    onChange={(event) =>
+                      setSelectedTranslationOption(event.target.value as TranslationOptionId)
+                    }
+                  >
+                    {TRANSLATION_OPTIONS.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
             </div>
@@ -718,49 +707,51 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
                   : (message.role === 'assistant' && isLoading ? '...' : '')}
               </div>
               {/* Translation buttons for each message */}
-              <div className="message-translation-controls">
-                <button
-                  className={`message-translation-btn ${detectLanguageSync(message.content) === 'en' ? 'active' : ''}`}
-                  onClick={() => {
-                    const currentLang = detectLanguageSync(message.content);
-                    if (currentLang !== 'en') {
-                      translateMessage(message.id, 'en');
-                    } else if (message.translations?.am) {
-                      // Switch to cached Amharic
-                      setMessages(prev => prev.map(msg => 
-                        msg.id === message.id 
-                          ? { ...msg, content: message.translations!.am! }
-                          : msg
-                      ));
-                    }
-                  }}
-                  disabled={isTranslating}
-                  title="View in English"
-                >
-                  EN
-                </button>
-                <span className="message-translation-separator">•</span>
-                <button
-                  className={`message-translation-btn ${detectLanguageSync(message.content) === 'am' ? 'active' : ''}`}
-                  onClick={() => {
-                    const currentLang = detectLanguageSync(message.content);
-                    if (currentLang !== 'am') {
-                      translateMessage(message.id, 'am');
-                    } else if (message.translations?.en) {
-                      // Switch to cached English
-                      setMessages(prev => prev.map(msg => 
-                        msg.id === message.id 
-                          ? { ...msg, content: message.translations!.en! }
-                          : msg
-                      ));
-                    }
-                  }}
-                  disabled={isTranslating}
-                  title="View in Amharic"
-                >
-                  አማ
-                </button>
-              </div>
+              {!isWorkflowSelected && (
+                <div className="message-translation-controls">
+                  <button
+                    className={`message-translation-btn ${detectLanguageSync(message.content) === 'en' ? 'active' : ''}`}
+                    onClick={() => {
+                      const currentLang = detectLanguageSync(message.content);
+                      if (currentLang !== 'en') {
+                        translateMessage(message.id, 'en');
+                      } else if (message.translations?.am) {
+                        // Switch to cached Amharic
+                        setMessages(prev => prev.map(msg => 
+                          msg.id === message.id 
+                            ? { ...msg, content: message.translations!.am! }
+                            : msg
+                        ));
+                      }
+                    }}
+                    disabled={isTranslating}
+                    title="View in English"
+                  >
+                    EN
+                  </button>
+                  <span className="message-translation-separator">•</span>
+                  <button
+                    className={`message-translation-btn ${detectLanguageSync(message.content) === 'am' ? 'active' : ''}`}
+                    onClick={() => {
+                      const currentLang = detectLanguageSync(message.content);
+                      if (currentLang !== 'am') {
+                        translateMessage(message.id, 'am');
+                      } else if (message.translations?.en) {
+                        // Switch to cached English
+                        setMessages(prev => prev.map(msg => 
+                          msg.id === message.id 
+                            ? { ...msg, content: message.translations!.en! }
+                            : msg
+                        ));
+                      }
+                    }}
+                    disabled={isTranslating}
+                    title="View in Amharic"
+                  >
+                    አማ
+                  </button>
+                </div>
+              )}
             </div>
           ))}
           <div ref={messagesEndRef} />
@@ -878,52 +869,30 @@ function ChatbotInterface({ onNavigateToVoice }: ChatbotInterfaceProps = {}) {
           gap: 4px;
         }
 
-        .provider-toggle {
+        .provider-dropdown {
+          position: relative;
           display: inline-flex;
-          background: #f8fafc;
-          border: 1px solid #e2e8f0;
-          border-radius: 999px;
-          padding: 3px;
-          gap: 4px;
         }
 
-        .provider-chip {
-          border: none;
-          border-radius: 999px;
-          padding: 6px 14px;
+        .provider-select {
+          appearance: none;
+          padding: 8px 36px 8px 12px;
+          border: 1px solid #e2e8f0;
+          border-radius: 8px;
+          background: #ffffff;
           font-size: 13px;
           font-weight: 600;
-          color: #475569;
-          background: transparent;
+          color: #1f2937;
           cursor: pointer;
-          display: flex;
-          align-items: center;
-          gap: 6px;
-          transition: all 0.2s ease;
+          transition: border-color 0.2s, box-shadow 0.2s;
         }
 
-        .provider-chip:hover {
-          background: rgba(220, 38, 38, 0.08);
-          color: #b91c1c;
+        .provider-select:focus {
+          outline: none;
+          border-color: #dc2626;
+          box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.15);
         }
 
-        .provider-chip.active {
-          background: white;
-          color: #dc2626;
-          box-shadow: 0 4px 12px rgba(220, 38, 38, 0.15);
-        }
-
-        .chip-label {
-          line-height: 1;
-        }
-
-        .chip-dot {
-          width: 8px;
-          height: 8px;
-          border-radius: 50%;
-          background: radial-gradient(circle, #f97316 0%, #dc2626 80%);
-          display: inline-block;
-        }
 
         .language-button {
           display: flex;

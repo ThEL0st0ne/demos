@@ -3,13 +3,19 @@ import { NextRequest, NextResponse } from 'next/server';
 const GOOGLE_TRANSLATE_URL = 'https://translation.googleapis.com/language/translate/v2';
 const CAMB_TRANSLATE_URL = 'https://client.camb.ai/apis/translate';
 const CAMB_RESULT_URL = 'https://client.camb.ai/apis/translation-result';
+const BACKENSTER_TRANSLATE_URL = 'https://api-b2b.backenster.com/b1/api/v3/translate';
 
 type LanguageCode = 'en' | 'am';
-type TranslationProvider = 'google' | 'camb';
+type TranslationProvider = 'google' | 'camb' | 'backenster';
 
 const CAMB_LANGUAGE_CODES: Record<LanguageCode, number> = {
   en: 1,
   am: 3,
+};
+
+const BACKENSTER_LANGUAGE_CODES: Record<LanguageCode, string> = {
+  en: 'en_GB',
+  am: 'am_ET',
 };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -167,6 +173,63 @@ async function translateWithCamb(text: string, targetLang: LanguageCode, sourceL
   throw new Error('Camb translation returned no texts');
 }
 
+async function translateWithBackenster(text: string, targetLang: LanguageCode, sourceLang?: LanguageCode) {
+  if (!sourceLang) {
+    throw new Error('Backenster translation requires sourceLang');
+  }
+
+  if (sourceLang === targetLang) {
+    return text;
+  }
+
+  const apiKey =
+    process.env.BACKENSTER_API_KEY || 'backenster-demo-key';
+
+  if (!apiKey) {
+    throw new Error('Backenster API key not configured');
+  }
+
+  const fromCode = BACKENSTER_LANGUAGE_CODES[sourceLang];
+  const toCode = BACKENSTER_LANGUAGE_CODES[targetLang];
+
+  if (!fromCode || !toCode) {
+    throw new Error('Unsupported language for Backenster translation');
+  }
+
+  const response = await fetch(BACKENSTER_TRANSLATE_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: apiKey,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      platform: 'api',
+      from: fromCode,
+      to: toCode,
+      data: text,
+      enableTransliteration: false,
+    }),
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    console.error('Backenster translate API error:', data);
+    throw new Error('Failed to translate with Backenster');
+  }
+
+  if (data.err) {
+    console.error('Backenster translate response error:', data.err);
+    throw new Error('Backenster translation returned an error');
+  }
+
+  if (typeof data.result === 'string' && data.result.length > 0) {
+    return data.result;
+  }
+
+  throw new Error('Backenster translation returned no result');
+}
+
 export async function POST(request: NextRequest) {
   try {
     const {
@@ -192,6 +255,8 @@ export async function POST(request: NextRequest) {
 
     if (provider === 'camb') {
       translatedText = await translateWithCamb(text, targetLang, sourceLang);
+    } else if (provider === 'backenster') {
+      translatedText = await translateWithBackenster(text, targetLang, sourceLang);
     } else {
       translatedText = await translateWithGoogle(text, targetLang, sourceLang);
     }
